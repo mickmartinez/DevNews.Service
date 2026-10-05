@@ -14,4 +14,8 @@
     <Folder Include="Controllers\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\DevNews.Service.Infrastructure\DevNews.Service.Infrastructure.csproj" />
+  </ItemGroup>
+
 </Project>

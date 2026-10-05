@@ -1,3 +1,7 @@
 <Solution>
+  <Project Path="DevNews.Service.Domain/DevNews.Service.Domain.csproj" />
+  <Project Path="DevNews.Service.Infrastructure/DevNews.Service.Infrastructure.csproj" />
+  <Project Path="DevNews.Service.Tests/DevNews.Service.Tests.csproj" />
   <Project Path="DevNews.Service/DevNews.Service.csproj" />
+  <Project Path="DevNews.Services.Application/DevNews.Services.Application.csproj" />
 </Solution>
