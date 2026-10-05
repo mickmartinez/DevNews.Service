@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-This feature exposes a single read-only endpoint that returns the current weather forecast for a given city name. It is implemented as a MediatR Query (`GetWeatherForecastByCityQuery`) handled in the Application layer, which delegates data retrieval to an `IWeatherForecastProvider` abstraction. The Infrastructure layer supplies an in-memory/mock implementation of that provider — no external HTTP calls and no EF Core/persistence are involved. The Domain layer owns a `WeatherForecast` entity that encapsulates the temperature/unit conversion business rule (Celsius → Fahrenheit) and basic invariants, ensuring the Application layer never leaks domain types to the API by projecting to a `WeatherForecastDto`.
+This feature exposes a single read-only endpoint that returns the current weather forecast for a given city name. It is implemented as a MediatR Query (`GetWeatherForecastByCityQuery`) handled in the Application layer, which delegates data retrieval to an `IWeatherForecastProvider` abstraction. The Infrastructure layer supplies an `HttpClient`-based implementation of that provider backed by the free, keyless [Open-Meteo](https://open-meteo.com/) Geocoding and Forecast APIs — no EF Core/persistence are involved. The Domain layer owns a `WeatherForecast` entity that encapsulates the temperature/unit conversion business rule (Celsius → Fahrenheit) and basic invariants, ensuring the Application layer never leaks domain types to the API by projecting to a `WeatherForecastDto`.
 
 ## Technical Analysis
 
@@ -27,8 +27,10 @@ This feature exposes a single read-only endpoint that returns the current weathe
   - New Application-level exceptions: `CityNotFoundException` (maps to 404), `WeatherProviderUnavailableException` (maps to 503).
 
 - **Infrastructure (`DevNews.Service.Infrastructure`)**:
-  - New class `MockWeatherForecastProvider : IWeatherForecastProvider` — an in-memory/mock data source keyed by normalized city name, with a fixed seed list of supported cities (e.g., Seattle, London, Tokyo, Sydney, Cairo).
-  - DI registration extension (e.g., `AddWeatherInfrastructure(this IServiceCollection services)`) to register `IWeatherForecastProvider`.
+  - New class `OpenMeteoWeatherForecastProvider : IWeatherForecastProvider` — an `HttpClient`-based implementation that calls the Open-Meteo Geocoding API (`GET https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1`) to resolve a city name to latitude/longitude, then the Open-Meteo Forecast API (`GET https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code`) to retrieve the current temperature and WMO weather code, which is mapped to a human-readable summary.
+  - Both Open-Meteo APIs are free and keyless, so no API-key/secret configuration is required.
+  - Typed `HttpClient` registered via `IHttpClientFactory` (`services.AddHttpClient<OpenMeteoWeatherForecastProvider>(...)`) with a short request timeout (e.g. 5s) to keep the endpoint responsive. No single `BaseAddress` is configured on the typed client because the Geocoding (`geocoding-api.open-meteo.com`) and Forecast (`api.open-meteo.com`) APIs live on two different hosts; the provider instead issues absolute request URIs for both calls.
+  - DI registration extension (e.g., `AddWeatherInfrastructure(this IServiceCollection services)`) to register `IWeatherForecastProvider` → `OpenMeteoWeatherForecastProvider`.
   - No EF Core `DbContext` changes, no entity configurations, no migrations required for this feature.
 
 - **API (`DevNews.Service`)**:
@@ -47,7 +49,7 @@ flowchart LR
     API --> Infrastructure_DI[DI Composition Root only]
 ```
 
-The API layer composes DI (registering `MockWeatherForecastProvider` against `IWeatherForecastProvider`) but has no compile-time dependency on Infrastructure types beyond the composition root (`Program.cs`).
+The API layer composes DI (registering `OpenMeteoWeatherForecastProvider` against `IWeatherForecastProvider`) but has no compile-time dependency on Infrastructure types beyond the composition root (`Program.cs`).
 
 ## API Contract
 
@@ -256,28 +258,30 @@ public interface IWeatherForecastProvider
 }
 ```
 
-- Returns `null` when the city is not recognized (handler translates this to `CityNotFoundException`).
-- Throws `WeatherProviderUnavailableException` when the data source cannot be reached/queried (the mock implementation may simulate this for testing purposes but does not do so by default).
-- Returns a Domain `WeatherForecast` entity (constructed internally by the Infrastructure implementation), keeping entity construction co-located with the layer that owns the raw/seed data.
+- Returns `null` when the city is not recognized (geocoding API returns no results; handler translates this to `CityNotFoundException`).
+- Throws `WeatherProviderUnavailableException` when the geocoding or forecast HTTP calls fail, time out, or return an unparsable/unexpected response — the implementation wraps the low-level `HttpRequestException`/`TaskCanceledException`/deserialization failure so no transport or API-specific detail leaks to the consumer.
+- Returns a Domain `WeatherForecast` entity (constructed internally by the Infrastructure implementation from the Open-Meteo response), keeping entity construction co-located with the layer that owns the raw provider data.
 
 ## Infrastructure Layer (`DevNews.Service.Infrastructure`)
 
-- **`MockWeatherForecastProvider : IWeatherForecastProvider`**:
-  - Holds an in-memory, read-only seed dictionary keyed by a normalized (lower-invariant, trimmed) city name, mapping to a fixed `WeatherForecast` snapshot (or to the raw values needed to construct one on each call, using `DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime)` as `Date` so the forecast date reflects "today" on every call).
-  - Example seed set: Seattle, London, Tokyo, Sydney, Cairo — each with a fixed `TemperatureC` and `Summary` for deterministic test behavior.
-  - `GetForecastAsync` performs an in-memory dictionary lookup (`O(1)`, no I/O, no blocking calls) and returns `Task.FromResult<WeatherForecast?>(...)`.
+- **`OpenMeteoWeatherForecastProvider : IWeatherForecastProvider`**:
+  - Step 1 — **Geocoding**: calls `GET {geocoding-base}/v1/search?name={city}&count=1&language=en&format=json` to resolve the city name to a `latitude`/`longitude` pair and a canonical `name`. An empty/missing `results` array means the city is not recognized → returns `null`.
+  - Step 2 — **Forecast**: calls `GET {forecast-base}/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code&timezone=auto` to retrieve the current `temperature_2m` (°C) and `weather_code` (WMO code).
+  - Maps the numeric WMO `weather_code` to a short human-readable `Summary` (e.g. 0 → "Clear sky", 61 → "Rain") via an internal lookup table; unknown codes fall back to a generic "Unknown" summary rather than throwing.
+  - Constructs the `WeatherForecast` entity using the canonical city name from the geocoding response, today's date (`DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime)`), the returned temperature, and the mapped summary.
+  - Any `HttpRequestException`, non-success status code, timeout (`TaskCanceledException`/`OperationCanceledException` not caused by the caller's own `CancellationToken`), or JSON deserialization failure is caught and re-thrown as `WeatherProviderUnavailableException` with a generic message (no raw exception text/URLs in the message).
   - No `DbContext`, no `IEntityTypeConfiguration<T>`, no migrations — this feature has zero persistence footprint.
-  - No external HTTP client is used for this minimal scope; if a future iteration swaps in a real weather API, it would implement the same `IWeatherForecastProvider` interface behind an `HttpClient`-based class registered via `IHttpClientFactory`, without any change to the Application or API layers.
-- **DI Registration**: an `IServiceCollection` extension method (e.g., `AddWeatherInfrastructure`) in Infrastructure registers `IWeatherForecastProvider` → `MockWeatherForecastProvider` as a singleton (safe, since the mock data is immutable and stateless per call).
+  - No API key/secret is required — both Open-Meteo endpoints are free and keyless.
+- **DI Registration**: an `IServiceCollection` extension method (e.g., `AddWeatherInfrastructure`) in Infrastructure registers a typed `HttpClient` for `OpenMeteoWeatherForecastProvider` (via `AddHttpClient<>`) with a request timeout, and binds `IWeatherForecastProvider` → `OpenMeteoWeatherForecastProvider`. No `BaseAddress` is set on the typed client since the two Open-Meteo APIs are hosted on different domains; the provider builds absolute URIs for each call instead.
 
 ## Performance & Green Code Considerations
 
-- **Single provider call per request**: the handler calls `IWeatherForecastProvider.GetForecastAsync` exactly once — no redundant/repeated fetches within the request lifecycle.
+- **Single provider call per request**: the handler calls `IWeatherForecastProvider.GetForecastAsync` exactly once — no redundant/repeated fetches within the request lifecycle (the provider itself makes two outbound HTTP calls — geocoding then forecast — but this is an internal implementation detail of a single logical lookup).
 - **No collection/pagination concerns**: the endpoint returns a single object, not a list, so no pagination, `Skip`/`Take`, or max-page-size rules apply.
-- **Async all the way down**: the controller action, MediatR handler, and provider method are all `async` and accept/forward a `CancellationToken` sourced from `HttpContext.RequestAborted`.
-- **No tracking / no EF Core overhead**: this feature has no database interaction at all, eliminating any `AsNoTracking()` concerns — the in-memory dictionary lookup is O(1) and allocation-light.
-- **No blocking I/O**: the mock provider does not simulate network latency or perform synchronous blocking calls; `Task.FromResult` is used for the completed, already-available result.
-- **Safe error messages**: `ProblemDetails.Detail` for 404/503/500 responses contains only generic, pre-defined messages — never raw exception messages, stack traces, or provider implementation details, minimizing both security risk and unnecessary response payload size.
+- **Async all the way down**: the controller action, MediatR handler, and provider method are all `async` and accept/forward a `CancellationToken` sourced from `HttpContext.RequestAborted`, threaded into both outbound `HttpClient` calls.
+- **No tracking / no EF Core overhead**: this feature has no database interaction at all, eliminating any `AsNoTracking()` concerns.
+- **Bounded external calls**: the typed `HttpClient` has a short timeout (e.g. 5s) so a slow/unresponsive upstream API cannot hang the request indefinitely; a timeout is translated into `WeatherProviderUnavailableException` (503), never left to bubble up as an unhandled 500.
+- **Safe error messages**: `ProblemDetails.Detail` for 404/503/500 responses contains only generic, pre-defined messages — never raw exception messages, stack traces, upstream URLs, or provider implementation details, minimizing both security risk and unnecessary response payload size.
 
 ## Testing Requirements (`DevNews.Service.Tests`)
 
