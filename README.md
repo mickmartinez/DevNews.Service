@@ -33,6 +33,8 @@ Key conventions enforced throughout the codebase:
 
 ### Get weather forecast by city
 
+> **Note:** This feature is a test/reference implementation used to validate that the end-to-end agent workflow for building features (user story → spec → models → TDD tests → implementation → validation) works correctly in this repository. It is not a core DevNews capability.
+
 `GET /api/weather/{city}` returns the current weather forecast for a given city.
 
 The feature is implemented end-to-end following the architecture above:
