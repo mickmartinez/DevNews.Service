@@ -5,6 +5,10 @@
 - **Patterns:** CQRS pattern must be enforced using MediatR. Commands mutate state; Queries read state.
 - **State & Storage:** Use Entity Framework Core for database persistence strictly confined to the Infrastructure layer.
 - **Data Fetching:** All CQRS read-only queries must use `AsNoTracking()` and filter at the database level (`IQueryable.Where()`) before materialization.
+- **API Documentation (OpenAPI):** 
+  - All public endpoints must be documented using the native .NET 10 OpenAPI support (or Microsoft.AspNetCore.OpenApi).
+  - Configure OpenAPI documents cleanly in `Program.cs` with descriptive summaries, descriptions, tags, and explicit HTTP response status codes (e.g., 200, 201, 400, 401, 403, 404, 500).
+  - Ensure XML documentation comments are enabled in the API project properties (`<GenerateDocumentationFile>true</GenerateDocumentationFile>`) so OpenAPI can automatically surface them.
 - **Class Files:** Every class, record, or interface MUST live in its own separate `.cs` file. Multiple classes in a single file are forbidden unless they are small private nested classes.
 - **Comments:** Do not add comments that restate what the code already shows. Only comment where intent genuinely isn't obvious, and keep it to one short line.
 - **API Responses:** Use standard HTTP status codes and `ProblemDetails` for all error and validation responses.
